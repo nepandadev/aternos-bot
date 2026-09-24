@@ -13,9 +13,8 @@ router = Router()
 async def start_command(
     message: Message,
     db,
-    aternos
+    aternos,
 ):
-
     users = UserRepository(db)
 
     await users.register(
@@ -23,14 +22,12 @@ async def start_command(
     )
 
     if aternos.server is None:
-
         await message.answer(
             "<b>Сервер не найден</b>"
         )
-
         return
 
     await message.answer(
         "<b>Управление сервером</b>",
-        reply_markup=main_keyboard()
+        reply_markup=main_keyboard(),
     )

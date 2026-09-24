@@ -1,13 +1,18 @@
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
+def main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                KeyboardButton(text="Запуск"),
-                KeyboardButton(text="Статус"),
+                InlineKeyboardButton(
+                    text="🚀 Запуск",
+                    callback_data="server_start",
+                ),
+                InlineKeyboardButton(
+                    text="📊 Статус",
+                    callback_data="server_status",
+                ),
             ]
-        ],
-        resize_keyboard=True,
+        ]
     )

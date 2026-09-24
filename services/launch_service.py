@@ -82,7 +82,9 @@ class LaunchService:
                 )
 
             status = (
-                await self.aternos.fetch()
+                await self.aternos.fetch(
+                    force=True
+                )
             )
 
             if status is None:
@@ -209,7 +211,9 @@ class LaunchService:
                 try:
 
                     status = (
-                        await self.aternos.fetch()
+                        await self.aternos.fetch(
+                            force=False
+                        )
                     )
 
                     print(
@@ -423,7 +427,9 @@ class LaunchService:
             )
 
         status = (
-            await self.aternos.fetch()
+            await self.aternos.fetch(
+                force=True
+            )
         )
 
         if status not in {

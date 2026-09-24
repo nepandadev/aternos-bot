@@ -1,5 +1,10 @@
 import asyncio
 import logging
+import os
+import gc
+
+import psutil
+import tracemalloc
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -25,6 +30,70 @@ logging.basicConfig(
     )
 )
 
+async def memory_monitor():
+
+    process = psutil.Process(
+        os.getpid()
+    )
+
+    snapshot_number = 0
+
+    while True:
+
+        try:
+
+            memory = process.memory_info()
+
+            rss_mb = (
+                memory.rss / 1024 / 1024
+            )
+
+            vms_mb = (
+                memory.vms / 1024 / 1024
+            )
+
+            print(
+                f"[MEMORY] "
+                f"RSS={rss_mb:.2f} MB | "
+                f"VMS={vms_mb:.2f} MB | "
+                f"Objects={len(gc.get_objects())}"
+            )
+
+            snapshot_number += 1
+
+            # Снимок каждые 30 секунд
+            if snapshot_number % 30 == 0:
+
+                snapshot = (
+                    tracemalloc.take_snapshot()
+                )
+
+                top_stats = snapshot.statistics(
+                    "lineno"
+                )
+
+                print(
+                    "\n========== MEMORY TOP =========="
+                )
+
+                for stat in top_stats[:10]:
+
+                    print(
+                        stat
+                    )
+
+                print(
+                    "================================\n"
+                )
+
+        except Exception as e:
+
+            print(
+                f"[MEMORY] "
+                f"Ошибка: {e}"
+            )
+
+        await asyncio.sleep(1)
 
 async def main():
 
@@ -150,6 +219,14 @@ async def main():
         session_monitor.run()
     )
 
+    memory_task = None
+
+    if os.getenv("MEMORY_MONITOR") == "1":
+        tracemalloc.start(10)
+        memory_task = asyncio.create_task(
+            memory_monitor()
+        )
+
     print(
         "Монитор сервера запущен."
     )
@@ -172,6 +249,14 @@ async def main():
 
         launch_service.stop()
 
+        if memory_task is not None:
+            memory_task.cancel()
+
+            await asyncio.gather(
+                memory_task,
+                return_exceptions=True
+            )
+
         session_task.cancel()
 
         await asyncio.gather(
@@ -185,7 +270,6 @@ async def main():
 
 
 if __name__ == "__main__":
-
     try:
 
         asyncio.run(

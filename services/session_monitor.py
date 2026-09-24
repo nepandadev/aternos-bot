@@ -7,7 +7,7 @@ class SessionMonitor:
         self,
         db,
         aternos,
-        interval
+        interval,
     ):
         self.aternos = aternos
         self.interval = interval
@@ -30,9 +30,9 @@ class SessionMonitor:
 
             try:
 
-                status = (
-                    await self.aternos.fetch()
-                )
+                # НЕ вызываем aternos.fetch()
+                # Берём уже полученный статус.
+                status = self.aternos.status
 
                 server_name = (
                     self.aternos.server_name
