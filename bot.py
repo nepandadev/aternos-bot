@@ -60,15 +60,8 @@ async def main():
 
     await aternos.connect()
 
-    if aternos.server is None:
-
-        print(
-            "Доступные серверы не найдены!"
-        )
-
-        await db.close()
-
-        return
+    if not aternos.connected:
+        raise RuntimeError("Aternos не подключен")
 
     print(
         f"Подключено к серверу: "
