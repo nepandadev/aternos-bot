@@ -8,13 +8,11 @@ import string
 from typing import Any
 
 import cloudscraper
-import websockets
 
 
 logger = logging.getLogger(__name__)
 
 ATERNOS_BASE = "https://aternos.org"
-WEBSOCKET_URL = "wss://aternos.org/hermes/"
 
 STATUS_NAMES = {
     0: "offline",
@@ -25,6 +23,18 @@ STATUS_NAMES = {
     6: "loading",
     10: "preparing",
 }
+
+_BAD_TOKEN_PARTS = (
+    "document",
+    "element",
+    "timeout",
+    "prepend",
+    "append",
+    "prototype",
+    "consent",
+    "window",
+    "map",
+)
 
 
 class AternosClient:
@@ -92,20 +102,13 @@ class AternosClient:
 
             logger.info("Подключение к Aternos...")
 
-            servers_html = await asyncio.to_thread(
-                self._get,
-                "/servers/",
-            )
+            servers_html = await asyncio.to_thread(self._get, "/servers/")
 
             if not self.server_id:
-                self.server_id = self._extract_server_id(
-                    servers_html
-                )
+                self.server_id = self._extract_server_id(servers_html)
 
             if not self.server_id:
-                raise RuntimeError(
-                    "Aternos: сервер не найден"
-                )
+                raise RuntimeError("Aternos: сервер не найден")
 
             self.session.cookies.set(
                 "ATERNOS_SERVER",
@@ -125,13 +128,11 @@ class AternosClient:
                 self.server_id,
             )
 
-            info = await self.get_server_info()
+            info = await self.get_server_info(update_token=True)
             self._apply_status(info)
 
             self._running = True
-            self.websocket_task = asyncio.create_task(
-                self._status_poll_loop()
-            )
+            self.websocket_task = asyncio.create_task(self._status_poll_loop())
 
             logger.info(
                 "Aternos подключен: %s (%s)",
@@ -139,30 +140,23 @@ class AternosClient:
                 self.status,
             )
 
-    async def get_server_info(self) -> dict[str, Any]:
-        page = await asyncio.to_thread(
-            self._get,
-            "/server",
-        )
+    async def get_server_info(self, update_token: bool = True) -> dict[str, Any]:
+        page = await asyncio.to_thread(self._get, "/server")
 
         info = self._extract_last_status(page)
-
         if info is None:
-            raise RuntimeError(
-                "Aternos: не найден lastStatus на /server"
-            )
+            raise RuntimeError("Aternos: не найден lastStatus на /server")
 
-        self._generate_sec()
-        self._extract_ajax_token(page)
+        if update_token:
+            self._generate_sec()
+            self._extract_ajax_token(page)
 
         self.server_info = info
         self._apply_status(info)
-
         return info
 
     async def start(self) -> dict[str, Any]:
         await self._prepare_ajax()
-
         return await self._ajax(
             "/ajax/server/start",
             {
@@ -174,9 +168,7 @@ class AternosClient:
         )
 
     async def confirm(self) -> dict[str, Any]:
-        if not self.token or not self.sec:
-            await self._prepare_ajax()
-
+        await self._prepare_ajax()
         return await self._ajax(
             "/ajax/server/confirm",
             {
@@ -189,7 +181,6 @@ class AternosClient:
 
     async def stop(self) -> dict[str, Any]:
         await self._prepare_ajax()
-
         return await self._ajax(
             "/ajax/server/stop",
             {
@@ -199,19 +190,11 @@ class AternosClient:
         )
 
     async def _prepare_ajax(self) -> None:
-        await self.get_server_info()
-
+        await self.get_server_info(update_token=True)
         if not self.token or not self.sec:
-            raise RuntimeError(
-                "Aternos: не удалось получить AJAX TOKEN/SEC"
-            )
+            raise RuntimeError("Aternos: не удалось получить AJAX TOKEN/SEC")
 
-    async def _ajax(
-        self,
-        path: str,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-
+    async def _ajax(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         def request():
             response = self.session.get(
                 f"{ATERNOS_BASE}{path}",
@@ -222,39 +205,30 @@ class AternosClient:
                 },
                 timeout=20,
             )
-
             response.raise_for_status()
-
             try:
                 return response.json()
             except ValueError:
                 raise RuntimeError(
                     f"Aternos вернул не JSON: "
-                    f"{response.status_code} "
-                    f"{response.text[:500]}"
+                    f"{response.status_code} {response.text[:500]}"
                 )
 
         result = await asyncio.to_thread(request)
 
         if isinstance(result, dict) and result.get("success") is False:
             error = result.get("error") or "unknown error"
-            raise RuntimeError(
-                f"Aternos API: {error}"
-            )
+            raise RuntimeError(f"Aternos API: {error}")
 
         return result
 
     def _get(self, path: str) -> str:
         response = self.session.get(
             f"{ATERNOS_BASE}{path}",
-            headers={
-                "Referer": f"{ATERNOS_BASE}/",
-            },
+            headers={"Referer": f"{ATERNOS_BASE}/"},
             timeout=20,
         )
-
         response.raise_for_status()
-
         return response.text
 
     # ---------------------------------------------------------
@@ -262,109 +236,323 @@ class AternosClient:
     # ---------------------------------------------------------
 
     def _extract_ajax_token(self, page: str) -> None:
-        token = None
-
-        match = re.search(
-            r'window\[\(\s*"AJA"\s*\+\s*"X_"\s*\+\s*"TOKEN"\s*\)\]\s*=\s*(.+?);',
+        scripts = re.findall(
+            r"<script[^>]*>(.*?)</script>",
             page,
+            re.DOTALL | re.IGNORECASE,
+        )
+
+        target = ""
+        for script in scripts:
+            if "AJAX_TOKEN" in script or "XAJA" in script or "EKOT_" in script:
+                target = script
+                break
+
+        if not target:
+            raise RuntimeError("Aternos: script с AJAX_TOKEN не найден")
+
+        # Только исполняемый код (после /*...*/)
+        exec_part = target.split("*/")[-1]
+
+        token = self._parse_ajax_assignment(exec_part)
+
+        if not self._is_valid_token(token):
+            with open("aternos_token_debug.js", "w", encoding="utf-8") as f:
+                f.write(target)
+            raise RuntimeError(f"Aternos: невалидный AJAX_TOKEN: {token!r}")
+
+        self.token = token
+        logger.info("AJAX_TOKEN получен: %s...", self.token[:8])
+
+    def _parse_ajax_assignment(self, exec_part: str) -> str | None:
+        # window["AJAX_TOKEN"]=  ИЛИ  window['AJAX_TOKEN']=  ИЛИ  ]=
+        m = re.search(
+            r'(?:window\s*\[\s*[\'"]AJAX_TOKEN[\'"]\s*\]|\])\s*=\s*',
+            exec_part,
+        )
+        if not m:
+            return self._token_candidates(exec_part)
+
+        i = m.end()
+
+        # опциональный !
+        while i < len(exec_part) and exec_part[i].isspace():
+            i += 1
+        if i < len(exec_part) and exec_part[i] == "!":
+            i += 1
+            while i < len(exec_part) and exec_part[i].isspace():
+                i += 1
+
+        # условие в (...)
+        if i >= len(exec_part) or exec_part[i] != "(":
+            return self._token_candidates(exec_part)
+
+        depth = 0
+        while i < len(exec_part):
+            ch = exec_part[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+
+        while i < len(exec_part) and exec_part[i].isspace():
+            i += 1
+
+        if i >= len(exec_part) or exec_part[i] != "?":
+            return self._token_candidates(exec_part)
+
+        ternary = exec_part[i + 1:]
+        return self._parse_ternary_rhs(ternary)
+
+    def _parse_ternary_rhs(self, ternary: str) -> str | None:
+        """
+        В браузере condition=true => берём ветку после ':'.
+        LEFT : RIGHT
+        """
+        # Найдём ':' верхнего уровня
+        depth = 0
+        in_str = False
+        quote = ""
+        colon = -1
+        i = 0
+        while i < len(ternary):
+            ch = ternary[i]
+            if in_str:
+                if ch == "\\" and i + 1 < len(ternary):
+                    i += 2
+                    continue
+                if ch == quote:
+                    in_str = False
+                i += 1
+                continue
+            if ch in "\"'":
+                in_str = True
+                quote = ch
+            elif ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == ":" and depth == 0:
+                colon = i
+                break
+            i += 1
+
+        if colon == -1:
+            return None
+
+        rhs = ternary[colon + 1:].strip()
+        return self._eval_token_expr(rhs)
+
+    def _eval_token_expr(self, expr: str) -> str | None:
+        expr = expr.strip().rstrip(";").strip()
+
+        # ("a" + "b" + "c")
+        m = re.match(
+            r'^\(\s*("[^"]+"\s*(?:\+\s*"[^"]+"\s*)*)\)\s*$',
+            expr,
+            re.DOTALL,
+        )
+        if m:
+            return "".join(re.findall(r'"([^"]*)"', m.group(1)))
+
+        # "TOKEN"
+        m = re.match(r'^"([^"]+)"\s*$', expr)
+        if m:
+            return m.group(1)
+
+        # ["c","b","a"].reverse().join('')
+        m = re.match(
+            r'^\[([^\]]+)\]\s*\.\s*reverse\s*\(\s*\)\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)\s*$',
+            expr,
+            re.DOTALL,
+        )
+        if m:
+            parts = re.findall(r'"([^"]*)"', m.group(1))
+            return "".join(reversed(parts))
+
+        # ["a","b"].map(s => s.split('').reverse().join('')).join('')
+        m = re.match(
+            r'^\[([^\]]+)\]\s*\.\s*map\s*\(\s*s\s*=>\s*s\.split\(\s*[\'"]{0,2}\s*\)'
+            r'\.reverse\(\s*\)\.join\(\s*[\'"]{0,2}\s*\)\s*\)\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)\s*$',
+            expr,
+            re.DOTALL,
+        )
+        if m:
+            parts = re.findall(r'"([^"]*)"', m.group(1))
+            return "".join(p[::-1] for p in parts)
+
+        # ["a","b"].join('')
+        m = re.match(
+            r'^\[([^\]]+)\]\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)\s*$',
+            expr,
+            re.DOTALL,
+        )
+        if m:
+            parts = re.findall(r'"([^"]*)"', m.group(1))
+            return "".join(parts)
+
+        # fallback: все строковые литералы подряд
+        parts = re.findall(r'"([^"]*)"', expr)
+        if parts:
+            joined = "".join(parts)
+            if self._is_valid_token(joined):
+                return joined
+
+        return None
+
+    def _token_candidates(self, exec_part: str) -> str | None:
+        candidates: list[str] = []
+
+        for m in re.finditer(
+            r':\s*\(\s*("[^"]+"\s*(?:\+\s*"[^"]+"\s*)*)\)',
+            exec_part,
+            re.DOTALL,
+        ):
+            candidates.append("".join(re.findall(r'"([^"]*)"', m.group(1))))
+
+        for m in re.finditer(
+            r':\s*\[([^\]]+)\]\s*\.\s*reverse\s*\(\s*\)\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)',
+            exec_part,
+            re.DOTALL,
+        ):
+            parts = re.findall(r'"([^"]*)"', m.group(1))
+            candidates.append("".join(reversed(parts)))
+
+        for m in re.finditer(
+            r':\s*\[([^\]]+)\]\s*\.\s*map\s*\(\s*s\s*=>\s*s\.split\([\'"]{0,2}\)'
+            r'\.reverse\(\)\.join\([\'"]{0,2}\)\)\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)',
+            exec_part,
+            re.DOTALL,
+        ):
+            parts = re.findall(r'"([^"]*)"', m.group(1))
+            candidates.append("".join(p[::-1] for p in parts))
+
+        for m in re.finditer(r':\s*"([A-Za-z0-9]{12,})"', exec_part):
+            candidates.append(m.group(1))
+
+        for token in reversed(candidates):
+            if self._is_valid_token(token):
+                return token
+        return None
+
+    def _token_from_script(self, exec_part: str) -> str | None:
+        candidates: list[str] = []
+
+        # :["c","b","a"].reverse().join('')
+        for m in re.finditer(
+            r':\s*\[([^\]]+)\]\s*\.\s*reverse\s*\(\s*\)\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)',
+            exec_part,
+            re.DOTALL,
+        ):
+            parts = re.findall(r'"([^"]*)"', m.group(1))
+            if parts:
+                candidates.append("".join(reversed(parts)))
+
+        # :["a","b","c"].join('')  (без reverse)
+        for m in re.finditer(
+            r':\s*\[([^\]]+)\]\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)',
+            exec_part,
+            re.DOTALL,
+        ):
+            parts = re.findall(r'"([^"]*)"', m.group(1))
+            if parts:
+                candidates.append("".join(parts))
+
+        # :"REALTOKEN"
+        for m in re.finditer(r':\s*"([A-Za-z0-9]{12,})"', exec_part):
+            candidates.append(m.group(1))
+
+        # ? "FAKE" : "REAL"  уже покрыто выше через :"
+        # Дополнительно: последняя строка вида "TOKEN" после ?
+        for m in re.finditer(
+            r'\?\s*(?:"[^"]+"|\[[^\]]+\][^:]*)\s*:\s*(?:"([A-Za-z0-9]{12,})"|\[[^\]]+\])',
+            exec_part,
+            re.DOTALL,
+        ):
+            if m.group(1):
+                candidates.append(m.group(1))
+
+        # Берём последний валидный кандидат (обычно RHS ternary)
+        for token in reversed(candidates):
+            if self._is_valid_token(token):
+                return token
+
+        return candidates[-1] if candidates else None
+
+    def _parse_ternary_token(self, ternary: str) -> str:
+        """
+        В браузере условие истинно => !(true) == false => берём ветку после ':'.
+        Поддерживаемые формы:
+          "FAKE" : ["c","b","a"].reverse().join('')
+          ["c","b","a"].reverse().join('') : "REAL"
+          "FAKE" : "REAL"
+        """
+        # "FAKE" : [...].reverse().join('')
+        match = re.match(
+            r'\s*"([^"]+)"\s*:\s*\[([^\]]+)\]\s*\.\s*reverse\s*\(\s*\)'
+            r'\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)',
+            ternary,
             re.DOTALL,
         )
         if match:
-            token = self._parse_token_expression(match.group(1))
+            parts = re.findall(r'"([^"]*)"', match.group(2))
+            return "".join(reversed(parts))
 
-        if not token:
-            match = re.search(
-                r'window\s*\[\s*["\']AJAX_TOKEN["\']\s*\]\s*=\s*(.+?);',
-                page,
-                re.DOTALL,
-            )
-            if match:
-                token = self._parse_token_expression(match.group(1))
+        # [...].reverse().join('') : "REAL"
+        match = re.match(
+            r'\s*\[[^\]]+\]\s*\.\s*reverse\s*\(\s*\)\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)'
+            r'\s*:\s*"([^"]+)"',
+            ternary,
+            re.DOTALL,
+        )
+        if match:
+            return match.group(1)
 
-        if not token:
-            match = re.search(
-                r'window\.AJAX_TOKEN\s*=\s*(.+?);',
-                page,
-                re.DOTALL,
-            )
-            if match:
-                token = self._parse_token_expression(match.group(1))
+        # "FAKE" : "REAL"
+        match = re.match(
+            r'\s*"([^"]+)"\s*:\s*"([^"]+)"',
+            ternary,
+        )
+        if match:
+            return match.group(2)
 
-        if not token:
-            match = re.search(
-                r'/\*\s*window\s*\[\s*["\']AJAX_TOKEN["\']\s*\]\s*=\s*["\']([^"\']+)["\']\s*\}\s*\*/',
-                page,
-            )
-            if match:
-                token = match.group(1)
+        # [...].join('') : "REAL"  (без reverse)
+        match = re.match(
+            r'\s*\[([^\]]+)\]\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)\s*:\s*"([^"]+)"',
+            ternary,
+            re.DOTALL,
+        )
+        if match:
+            return match.group(2)
 
-        if not token:
-            match = re.search(
-                r'AJAX_TOKEN\s*=\s*["\']([A-Za-z0-9_\-]{16,})["\']',
-                page,
-            )
-            if match:
-                token = match.group(1)
+        # "FAKE" : [...].join('')  (без reverse)
+        match = re.match(
+            r'\s*"([^"]+)"\s*:\s*\[([^\]]+)\]\s*\.\s*join\s*\(\s*[\'"]{0,2}\s*\)',
+            ternary,
+            re.DOTALL,
+        )
+        if match:
+            parts = re.findall(r'"([^"]*)"', match.group(2))
+            return "".join(parts)
 
-        if not token:
-            match = re.search(
-                r'\?\s*["\']([A-Za-z0-9_\-]{16,})["\']\s*:\s*["\']([A-Za-z0-9_\-]{16,})["\']',
-                page,
-            )
-            if match:
-                token = match.group(2)
+        raise RuntimeError("Aternos: не удалось разобрать AJAX_TOKEN ternary")
 
-        if not token:
-            scripts = re.findall(
-                r'<script[^>]*>(.*?)</script>',
-                page,
-                re.DOTALL | re.IGNORECASE,
-            )
-            for script in scripts:
-                if "TOKEN" not in script and "AJAX" not in script:
-                    continue
-                candidates = re.findall(
-                    r'["\']([A-Za-z0-9_\-]{20,})["\']',
-                    script,
-                )
-                if candidates:
-                    token = max(candidates, key=len)
-                    break
-
-        if not token:
-            raise RuntimeError("Aternos: AJAX_TOKEN не найден")
-
-        self.token = token
-        logger.debug("AJAX_TOKEN получен: %s...", self.token[:8])
-
-    def _parse_token_expression(self, expression: str) -> str | None:
-        expression = expression.strip()
-
-        colon = expression.rfind(":")
-        if colon != -1:
-            value_expression = expression[colon + 1:]
-        else:
-            value_expression = expression
-
-        parts = re.findall(r'["\']([^"\']*)["\']', value_expression)
-        if not parts:
-            return None
-
-        token = "".join(parts)
-        return token if token else None
+    @staticmethod
+    def _is_valid_token(token: str | None) -> bool:
+        if not token or len(token) < 10:
+            return False
+        low = token.lower()
+        return not any(part in low for part in _BAD_TOKEN_PARTS)
 
     def _generate_sec(self) -> None:
         alphabet = string.ascii_letters + string.digits
 
-        key = "".join(
-            secrets.choice(alphabet)
-            for _ in range(11)
-        ) + "00000"
-
-        value = "".join(
-            secrets.choice(alphabet)
-            for _ in range(11)
-        ) + "00000"
+        key = "".join(secrets.choice(alphabet) for _ in range(11)) + "00000"
+        value = "".join(secrets.choice(alphabet) for _ in range(11)) + "00000"
 
         self.sec = f"{key}:{value}"
 
@@ -384,18 +572,11 @@ class AternosClient:
             r'<div\s+class="server-body"\s+data-id="([^"]+)"',
             page,
         )
-
         if not matches:
             return None
-
         return matches[0].strip()
 
-    def _extract_server_name(
-        self,
-        page: str,
-        server_id: str,
-    ) -> str | None:
-
+    def _extract_server_name(self, page: str, server_id: str) -> str | None:
         pattern = (
             rf'<div\s+class="server-body"\s+'
             rf'data-id="{re.escape(server_id)}"'
@@ -404,35 +585,22 @@ class AternosClient:
             rf'(.*?)'
             rf'\s*</div>'
         )
-
-        match = re.search(
-            pattern,
-            page,
-            re.DOTALL,
-        )
-
+        match = re.search(pattern, page, re.DOTALL)
         if not match:
             return None
-
         return html.unescape(
             re.sub(r"<[^>]+>", "", match.group(1))
         ).strip()
 
-    def _extract_last_status(
-        self,
-        page: str,
-    ) -> dict[str, Any] | None:
-
+    def _extract_last_status(self, page: str) -> dict[str, Any] | None:
         match = re.search(
             r"\b(?:var|let|const)\s+lastStatus\s*=",
             page,
         )
-
         if not match:
             return None
 
         start = page.find("{", match.end())
-
         if start == -1:
             return None
 
@@ -464,24 +632,15 @@ class AternosClient:
                         return json.loads(raw)
                     except json.JSONDecodeError:
                         return None
-
         return None
 
-    def _apply_status(
-        self,
-        info: dict[str, Any],
-    ) -> None:
-
+    def _apply_status(self, info: dict[str, Any]) -> None:
         self.server_info = info
-
         raw_status = info.get("status")
 
         if isinstance(raw_status, int):
             self.status_code = raw_status
-            self.status = STATUS_NAMES.get(
-                raw_status,
-                info.get("lang"),
-            )
+            self.status = STATUS_NAMES.get(raw_status, info.get("lang"))
         else:
             self.status = info.get("lang")
 
@@ -489,26 +648,21 @@ class AternosClient:
             self.server_name = info["name"]
 
     # ---------------------------------------------------------
-    # STATUS POLLING (вместо WebSocket — CF даёт 403 на WS)
+    # STATUS POLLING
     # ---------------------------------------------------------
 
     async def _status_poll_loop(self) -> None:
         while self._running:
             try:
-                info = await self.get_server_info()
+                info = await self.get_server_info(update_token=False)
                 old = self.status
                 self._apply_status(info)
                 if old != self.status:
-                    logger.info(
-                        "Статус Aternos: %s -> %s",
-                        old,
-                        self.status,
-                    )
+                    logger.info("Статус Aternos: %s -> %s", old, self.status)
             except asyncio.CancelledError:
                 return
             except Exception:
                 logger.exception("Ошибка опроса статуса Aternos")
-
             await asyncio.sleep(15)
 
     # ---------------------------------------------------------
@@ -529,10 +683,7 @@ class AternosClient:
                 pass
 
         self.websocket = None
-
-        await asyncio.to_thread(
-            self.session.close
-        )
+        await asyncio.to_thread(self.session.close)
 
     @property
     def connected(self) -> bool:

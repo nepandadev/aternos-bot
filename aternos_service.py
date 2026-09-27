@@ -106,6 +106,16 @@ class AternosService:
         self._status = None
         self._server_name = None
 
+    async def fetch(self):
+        if not self.client:
+            await self.connect()
+
+        if self.client:
+            await self.client.get_server_info()
+            self._update_state()
+
+        return self._status
+
     @property
     def status(self):
         return self._status
