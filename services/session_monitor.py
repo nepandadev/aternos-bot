@@ -31,7 +31,7 @@ class SessionMonitor:
             try:
 
                 status = (
-                    await self.aternos.fetch()
+                    await self.aternos.refresh()
                 )
 
                 server_name = (

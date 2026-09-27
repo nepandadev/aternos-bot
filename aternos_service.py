@@ -1,111 +1,141 @@
 import asyncio
+import logging
 
-from python_aternos import Client
+from aternos_client import AternosClient
+
+
+logger = logging.getLogger(__name__)
 
 
 class AternosService:
 
-    def __init__(self, session_cookie: str):
+    def __init__(
+        self,
+        session_cookie: str,
+        server_id: str | None = None,
+    ):
         self.session_cookie = session_cookie
+        self.server_id = server_id
 
-        self.client = None
-        self.account = None
-        self.server = None
+        self.client: AternosClient | None = None
 
-        # Не даём двум операциям одновременно
-        # обращаться к python-aternos.
         self._lock = asyncio.Lock()
+        self._connected = False
+
+        self._status = None
+        self._server_name = None
 
     async def connect(self):
         async with self._lock:
-            await asyncio.to_thread(
-                self._connect_sync
+
+            if self._connected:
+                return
+
+            self.client = AternosClient(
+                session_cookie=self.session_cookie,
+                server_id=self.server_id,
             )
 
-    def _connect_sync(self):
-        client = Client()
+            await self.client.connect()
 
-        client.login_with_session(
-            self.session_cookie
-        )
+            self._update_state()
 
-        account = client.account
-        servers = account.list_servers()
+            self._connected = True
 
-        self.client = client
-        self.account = account
+            logger.info(
+                "Aternos подключен: %s (%s)",
+                self._server_name,
+                self._status,
+            )
 
-        if not servers:
-            self.server = None
+    def _update_state(self):
+        if not self.client:
             return
 
-        self.server = servers[0]
+        self._status = self.client.status
+        self._server_name = self.client.server_name
 
-        # Важно для python-aternos.
-        self.server.fetch()
+    async def refresh(self):
+        """
+        Никаких HTTP-запросов.
 
-    @property
-    def server_name(self):
-        if self.server is None:
-            return None
+        Статус приходит через постоянный WebSocket.
+        Метод оставлен для совместимости с SessionMonitor.
+        """
 
-        return self.server.subdomain
+        if not self._connected:
+            await self.connect()
+            return
+
+        self._update_state()
+
+    async def start(self):
+        if not self.client:
+            await self.connect()
+
+        result = await self.client.start()
+
+        self._update_state()
+
+        return result
+
+    async def confirm(self):
+        if not self.client:
+            await self.connect()
+
+        return await self.client.confirm()
+
+    async def stop(self):
+        if not self.client:
+            await self.connect()
+
+        result = await self.client.stop()
+
+        self._update_state()
+
+        return result
+
+    async def close(self):
+        self._connected = False
+
+        if self.client:
+            await self.client.close()
+
+        self.client = None
+
+        self._status = None
+        self._server_name = None
+
+    async def fetch(self):
+        if not self.client:
+            await self.connect()
+
+        if self.client:
+            await self.client.get_server_info()
+            self._update_state()
+
+        return self._status
 
     @property
     def status(self):
-        if self.server is None:
-            return None
+        return self._status
 
-        return str(
-            self.server.status
-        ).lower()
+    @property
+    def server_name(self):
+        return self._server_name
 
-    async def fetch(self):
-        async with self._lock:
+    @property
+    def server_obj(self):
+        """
+        Совместимость со старым кодом.
+        """
 
-            if self.server is None:
-                return None
+        return self.client
 
-            await asyncio.to_thread(
-                self.server.fetch
-            )
+    @property
+    def connected(self) -> bool:
+        return self._connected
 
-            return str(
-                self.server.status
-            ).lower()
-
-    async def start(self):
-
-        async with self._lock:
-
-            if self.server is None:
-                raise RuntimeError(
-                    "Сервер Aternos не найден"
-                )
-
-            await asyncio.to_thread(
-                self.server.start
-            )
-
-    async def confirm(self):
-
-        async with self._lock:
-
-            if self.server is None:
-                raise RuntimeError(
-                    "Сервер Aternos не найден"
-                )
-
-            if not hasattr(
-                self.server,
-                "confirm"
-            ):
-                raise RuntimeError(
-                    "В установленной версии "
-                    "python-aternos отсутствует "
-                    "server.confirm()"
-                )
-
-            await asyncio.to_thread(
-                self.server.confirm
-            )
+    @property
+    def server(self):
+        return self.client
